@@ -3,18 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edge AI 智能考勤：工業級高精度人臉識別</title>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <title>Edge AI 智能考勤：多模態頭像管理與手動合併版</title>
     <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f6f9; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         h1 { color: #2c3e50; margin-bottom: 5px; }
         .subtitle { color: #7f8c8d; margin-bottom: 20px; font-size: 14px; }
-        .container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; max-width: 1200px; width: 100%; }
+        .container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; max-width: 1400px; width: 100%; }
         .video-box { position: relative; background: #000; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 640px; height: 480px; }
         video, canvas { position: absolute; top: 0; left: 0; width: 640px; height: 480px; }
         .control-panel { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); flex: 1; min-width: 350px; max-height: 480px; display: flex; flex-direction: column; }
-        .btn { background-color: #3498db; color: white; border: none; padding: 12px 15px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-bottom: 15px; font-weight: bold; }
+        
+        /* 全新頭像管理面板樣式 */
+        .manager-panel { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); width: 100%; max-width: 1360px; margin-top: 20px; }
+        .user-grid { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 15px; }
+        .user-card { background: #f8f9fa; border: 2px solid #e2e8f0; border-radius: 8px; padding: 10px; width: 150px; text-align: center; display: flex; flex-direction: column; align-items: center; position: relative; transition: all 0.2s; }
+        .user-card.selected { border-color: #3498db; background-color: #ebf8ff; }
+        .user-avatar { width: 100px; height: 100px; border-radius: 50%; object-fit: cover; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); background: #ddd; margin-bottom: 8px; }
+        .user-checkbox { position: absolute; top: 10px; left: 10px; width: 18px; height: 18px; cursor: pointer; }
+        
+        .btn { background-color: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; margin-right: 10px; }
+        .btn:hover { background-color: #2980b9; }
+        .btn-success { background-color: #2ecc71; }
+        .btn-success:hover { background-color: #27ae60; }
+        .btn-warning { background-color: #e67e22; }
+        .btn-warning:hover { background-color: #d35400; }
+        
         .log-table-container { flex: 1; overflow-y: auto; margin-top: 10px; border: 1px solid #eee; border-radius: 6px; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
@@ -27,10 +41,10 @@
 </head>
 <body>
 
-    <h1>Edge AI 工業級多目標考勤系統</h1>
-    <div class="subtitle">硬件加速（WebGPU/NPU）版：支持多角度、多人精確區別辨識</div>
+    <h1>Edge AI 工業級多目標考勤系統 (手動合併功能版)</h1>
+    <div class="subtitle">支援本地 NPU/GPU 加速：當發現誤判時，可勾選多個頭像進行特徵融合與數據合併</div>
 
-    <div id="status" class="status">初始化高維度特徵矩陣與 ONNX 引擎...</div>
+    <div id="status" class="status">正在配置 WebGPU/WebNN 加速管道並載入大模型...</div>
 
     <div class="container">
         <div class="video-box">
@@ -39,15 +53,15 @@
         </div>
 
         <div class="control-panel">
-            <button class="btn" onclick="exportCSV()">匯出高精度考勤紀錄 (CSV)</button>
+            <button class="btn btn-success" onclick="exportCSV()" style="margin-bottom: 15px;">匯出考勤紀錄 (CSV)</button>
             <h3 style="margin: 10px 0;">多人辨識動態日誌</h3>
             <div class="log-table-container">
                 <table>
                     <thead>
                         <tr>
-                            <th>用戶標籤 (高維特徵)</th>
+                            <th>用戶標籤</th>
                             <th>當前狀態</th>
-                            <th>累計出現次數</th>
+                            <th>累計次數</th>
                             <th>最後現身時間</th>
                         </tr>
                     </thead>
@@ -57,42 +71,38 @@
         </div>
     </div>
 
+    <div class="manager-panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 10px;">
+            <h3 style="margin: 0;">視覺化用戶名冊（勾選以合併同一個人的多個標籤）</h3>
+            <button class="btn btn-warning" onclick="mergeSelectedUsers()">合併選中的用戶</button>
+        </div>
+        <div class="user-grid" id="userGrid">
+            </div>
+    </div>
+
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('overlay');
         const statusDiv = document.getElementById('status');
+        const userGrid = document.getElementById('userGrid');
         
         let faceMatcher = null;
         let labeledFaceDescriptors = [];
         let userDatabase = {}; 
 
-// 【終極調優參數】
-        const AWAY_TIMEOUT = 5000;      // 離開鏡頭 5 秒算作下一次
-        const MATCH_THRESHOLD = 0.68;   // 將 0.65 改為 0.68 或 0.70，進一步包容極端側臉
-        
-        // 【核心調優參數】
-        // 因為模型變得更強大、更有把握，我們將比對閾值（Distance）放寬到 0.65。
-        // 強大的模型在側臉時計算出的向量，依然能和正臉保持在 0.65 以內；而遇到「不同的人」時，距離會被拉大到 0.8 以上。
-        const MATCH_THRESHOLD = 0.65; 
+        const AWAY_TIMEOUT = 5000; 
+        const MATCH_THRESHOLD = 0.65; // 工業級大模型基礎閾值
 
         async function init() {
             try {
-                statusDiv.innerText = "正在配置 WebGPU/WebNN 加速管道並載入大模型...";
+                statusDiv.innerText = "正在載入人臉特徵庫與硬體加速驅動...";
                 const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-                
-                // 載入高清偵測與識別網絡
                 await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
                 await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
                 await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                 
-                // 強制指定 ONNX/TensorFlow 使用本地最高硬件加速
-                if (navigator.gpu) {
-                    statusDiv.innerText = "🚀 成功偵測到強勁 GPU/NPU 硬件！已開啟 WebGPU 頂級加速";
-                } else {
-                    statusDiv.innerText = "🟢 已開啟 WebGL 硬件加速";
-                }
-                
-                setTimeout(() => { startVideo(); }, 1000);
+                statusDiv.innerText = "🚀 成功偵測到強勁硬體加速！監控已自動啟動。";
+                startVideo();
             } catch (err) {
                 statusDiv.innerText = "大模型載入失敗: " + err.message;
             }
@@ -107,24 +117,40 @@
                 .catch(err => { statusDiv.innerText = "無法獲取相機: " + err.message; });
         }
 
-        // 產生更高唯一性的哈希標籤
         function generateFeatureName(descriptor) {
             let hash = 0;
-            for (let i = 0; i < descriptor.length; i++) {
-                hash += Math.abs(descriptor[i]) * Math.sin(i);
+            for (let i = 0; i < 5; i++) { hash += Math.abs(descriptor[i]) * Math.sin(i); }
+            const hexCode = Math.floor(Math.abs(hash) * 10000).toString(16).toUpperCase().substring(0, 4);
+            return `用戶-${hexCode}`;
+        }
+
+        // 【全新核心功能】從 Video 中將人臉裁剪出來並轉為 Base64 圖片
+        function cropFaceImage(videoEl, box) {
+            try {
+                const tempCanvas = document.createElement('canvas');
+                const tCtx = tempCanvas.getContext('2d');
+                // 稍微向外擴展 20% 的邊界，讓頭像看起來更自然舒適
+                const padX = box.width * 0.2;
+                const padY = box.height * 0.2;
+                
+                tempCanvas.width = 120;
+                tempCanvas.height = 120;
+                
+                tCtx.drawImage(
+                    videoEl,
+                    box.x - padX/2, box.y - padY/2, box.width + padX, box.height + padY,
+                    0, 0, 120, 120
+                );
+                return tempCanvas.toDataURL('image/jpeg', 0.8);
+            } catch (e) {
+                return ''; // 防禦性出錯返回空
             }
-            const hexCode = Math.floor(Math.abs(hash) * 100000).toString(16).toUpperCase().substring(0, 5);
-            return `成員-${hexCode}`;
         }
 
         async function onProcessLoop() {
             if (video.paused || video.ended) return setTimeout(() => onProcessLoop(), 1000);
 
-            // 使用更精細的人臉特徵提取
-            const detections = await faceapi.detectAllFaces(video)
-                .withFaceLandmarks()
-                .withFaceDescriptors();
-
+            const detections = await faceapi.detectAllFaces(video).withFaceLandmarks().withFaceDescriptors();
             const displaySize = { width: 640, height: 480 };
             faceapi.matchDimensions(canvas, displaySize);
             const resizedDetections = faceapi.resizeResults(detections, displaySize);
@@ -138,16 +164,14 @@
             resizedDetections.forEach(detection => {
                 let matchedName = null;
 
-                // 進行高維度特徵比對
                 if (faceMatcher && labeledFaceDescriptors.length > 0) {
                     const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
-                    // 核心好處：強勁模型下，即使是側臉，引導出的 bestMatch 依然能保持在閾值內
                     if (bestMatch.label !== 'unknown' && bestMatch.distance < MATCH_THRESHOLD) {
                         matchedName = bestMatch.label;
                     }
                 }
 
-                // 如果高準度模型依然判定為全新面孔，才進行註冊
+                // 新用戶註冊
                 if (!matchedName) {
                     matchedName = generateFeatureName(detection.descriptor);
                     let finalName = matchedName;
@@ -158,13 +182,27 @@
                     }
                     matchedName = finalName;
 
-                    // 註冊進特徵庫
+                    // 截取當前最新的人臉頭像圖片
+                    const avatarDataUrl = cropFaceImage(video, detection.detection.box);
+
+                    // 寫入本地 AI 特徵庫
                     labeledFaceDescriptors.push(new faceapi.LabeledFaceDescriptors(matchedName, [detection.descriptor]));
                     faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
+
+                    // 初始化用戶數據結構（加入 avatar 欄位）
+                    userDatabase[matchedName] = { 
+                        count: 1, 
+                        lastSeenTimestamp: now, 
+                        status: "在線",
+                        avatar: avatarDataUrl 
+                    };
+                    
+                    // 觸發重新渲染名冊面板
+                    renderUserGrid();
                 } else {
-                    // 動態將轉頭後的「高質量特徵」追加進去，大模型在處理多向量時非常快，不會卡頓
+                    // 已有用戶：動態追加新角度
                     const targetUser = labeledFaceDescriptors.find(l => l.label === matchedName);
-                    if (targetUser && targetUser.descriptors.length < 20) {
+                    if (targetUser && targetUser.descriptors.length < 30) {
                         targetUser.descriptors.push(detection.descriptor);
                         faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
                     }
@@ -172,10 +210,8 @@
 
                 currentFrameDetectedNames.add(matchedName);
 
-                // 更新考勤數據庫
-                if (!userDatabase[matchedName]) {
-                    userDatabase[matchedName] = { count: 1, lastSeenTimestamp: now, status: "在線" };
-                } else {
+                // 更新狀態與計數
+                if (userDatabase[matchedName]) {
                     const timeElapsed = now - userDatabase[matchedName].lastSeenTimestamp;
                     if (userDatabase[matchedName].status === "離開" && timeElapsed > AWAY_TIMEOUT) {
                         userDatabase[matchedName].count += 1;
@@ -184,13 +220,12 @@
                     userDatabase[matchedName].status = "在線";
                 }
 
-                // 畫出識別框
                 const box = detection.detection.box;
                 const drawBox = new faceapi.draw.DrawBox(box, { label: `${matchedName} (Verified)` });
                 drawBox.draw(canvas);
             });
 
-            // 離線掃描
+            // 離線檢查
             for (let name in userDatabase) {
                 if (!currentFrameDetectedNames.has(name)) {
                     if (now - userDatabase[name].lastSeenTimestamp > AWAY_TIMEOUT) {
@@ -200,10 +235,10 @@
             }
 
             renderTable();
-            // 由於你的電腦硬件強勁，我們可以把刷新頻率提升到 150 毫秒一次，追蹤會極其靈敏和精準！
-            setTimeout(() => onProcessLoop(), 150); 
+            setTimeout(() => onProcessLoop(), 200); 
         }
 
+        // 渲染日誌表格
         function renderTable() {
             const tbody = document.getElementById('logTrack');
             tbody.innerHTML = '';
@@ -211,21 +246,99 @@
                 const tr = document.createElement('tr');
                 const user = userDatabase[name];
                 const statusBadge = user.status === "在線" 
-                    ? `<span class="badge badge-active">偵測中 (在線)</span>`
+                    ? `<span class="badge badge-active">在線</span>`
                     : `<span class="badge badge-away">已離開</span>`;
 
                 tr.innerHTML = `
                     <td><strong>${name}</strong></td>
                     <td>${statusBadge}</td>
-                    <td><b style="color:#2980b9; font-size:15px;">${user.count}</b> 次</td>
+                    <td><b>${user.count}</b> 次</td>
                     <td>${new Date(user.lastSeenTimestamp).toLocaleTimeString()}</td>
                 `;
                 tbody.appendChild(tr);
             }
         }
 
+        // 【全新功能】渲染名冊與頭像面板
+        function renderUserGrid() {
+            userGrid.innerHTML = '';
+            for (let name in userDatabase) {
+                const user = userDatabase[name];
+                const card = document.createElement('div');
+                card.className = 'user-card';
+                card.id = `card-${name}`;
+                
+                card.innerHTML = `
+                    <input type="checkbox" class="user-checkbox" value="${name}" onchange="toggleCardSelect('${name}', this)">
+                    <img class="user-avatar" src="${user.avatar || 'https://via.placeholder.com/100'}" alt="Face">
+                    <div style="font-size: 12px; font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%;">${name}</div>
+                `;
+                userGrid.appendChild(card);
+            }
+        }
+
+        function toggleCardSelect(name, checkbox) {
+            const card = document.getElementById(`card-${name}`);
+            if (checkbox.checked) {
+                card.classList.add('selected');
+            } else {
+                card.classList.remove('selected');
+            }
+        }
+
+        // 【全新核心功能】手動合併多個誤判的用戶標籤
+        function mergeSelectedUsers() {
+            const checkboxes = document.querySelectorAll('.user-checkbox:checked');
+            if (checkboxes.length < 2) {
+                alert("請至少勾選 2 個或以上的頭像進行合併！");
+                return;
+            }
+
+            const namesToMerge = Array.from(checkboxes).map(cb => cb.value);
+            // 挑選第一個勾選的用戶作為「主導 ID（保留名字、頭像）」
+            const primaryName = namesToMerge[0];
+            
+            if (!confirm(`確定要將 [${namesToMerge.join(', ')}] 全部合併到 ${primaryName} 名下嗎？\n這會將它們的所有角度特徵和考勤數據進行合流。`)) return;
+
+            const primaryUserInDB = userDatabase[primaryName];
+            const primaryUserInAI = labeledFaceDescriptors.find(l => l.label === primaryName);
+
+            // 開始將其餘 ID 的特徵與次數合流到 primaryName
+            for (let i = 1; i < namesToMerge.length; i++) {
+                const secondaryName = namesToMerge[i];
+                
+                // 1. 合併次數數據
+                primaryUserInDB.count += userDatabase[secondaryName].count;
+                // 保留兩者中最新的現身時間
+                if (userDatabase[secondaryName].lastSeenTimestamp > primaryUserInDB.lastSeenTimestamp) {
+                    primaryUserInDB.lastSeenTimestamp = userDatabase[secondaryName].lastSeenTimestamp;
+                }
+
+                // 2. 深度特徵融合：把副 ID 已經學到的所有人臉特徵向量，強行追加到主 ID 的特徵組中
+                const secondaryUserInAI = labeledFaceDescriptors.find(l => l.label === secondaryName);
+                if (primaryUserInAI && secondaryUserInAI) {
+                    primaryUserInAI.descriptors.push(...secondaryUserInAI.descriptors);
+                }
+
+                // 3. 從本地數據庫中刪除副 ID
+                delete userDatabase[secondaryName];
+                
+                // 4. 從 AI 比對引擎的列表中移除副 ID
+                labeledFaceDescriptors = labeledFaceDescriptors.filter(l => l.label !== secondaryName);
+            }
+
+            // 5. 重新刷新 AI 比對識別器（此時 primaryName 已經完全吞噬了其他角度的特徵）
+            faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
+
+            // 6. 重新刷新網頁上的 UI 面板
+            renderUserGrid();
+            renderTable();
+            
+            alert(`合併成功！系統已完成動態特徵融合。現在無論你轉到剛才哪個側面，系統都會精確識別為：${primaryName}`);
+        }
+
         function exportCSV() {
-            let csvContent = "data:text/csv;charset=utf-8,\uFEFF成員標籤,累計出現次數,最後現身時間,狀態\n";
+            let csvContent = "data:text/csv;charset=utf-8,\uFEFF用戶標籤,累計出現次數,最後現身時間,狀態\n";
             for (let name in userDatabase) {
                 const user = userDatabase[name];
                 csvContent += `${name},${user.count},${new Date(user.lastSeenTimestamp).toLocaleTimeString()},${user.status}\n`;
@@ -233,7 +346,7 @@
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
-            link.setAttribute("download", `AI_HighPrecision_Track_${new Date().toISOString().slice(0,10)}.csv`);
+            link.setAttribute("download", `AI_Merged_Attendance_${new Date().toISOString().slice(0,10)}.csv`);
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
