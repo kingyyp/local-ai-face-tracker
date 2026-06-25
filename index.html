@@ -116,7 +116,7 @@
                 
                 // 核心改動：利用 ONNX Runtime Web 載入微軟工業級開源的 FERPlus 高精度模型
                 // 第一次加載會需要下載，之後瀏覽器會完美進行本機快取（Cache），秒開！
-                const onnxModelUrl = 'https://onnxruntime-demo-models.s3.amazonaws.com/emotion_ferplus/model.onnx';
+                const onnxModelUrl = 'https://huggingface.co/microsoft/FERPlus/resolve/main/model.onnx';
                 
                 // 根據你強勁的硬體配置，優先選用 WebGPU 進行硬體加速，否則退回 WebGL 或 WASM
                 const options = { executionProviders: ['webgpu', 'webgl', 'wasm'] };
