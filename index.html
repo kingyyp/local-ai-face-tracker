@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edge AI 智能考勤：自動註冊與在線追蹤</title>
+    <title>Edge AI 智能考勤：多角度動態融合追蹤</title>
     <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
     <style>
         body {
@@ -104,8 +104,8 @@
 </head>
 <body>
 
-    <h1>Edge AI 智能考勤系統</h1>
-    <div class="subtitle">全自動零操作：自動註冊、自動特徵命名、防刷屏在線追蹤</div>
+    <h1>Edge AI 智能考勤系統 (多角度修復版)</h1>
+    <div class="subtitle">全自動零操作：動態學習側臉特徵，防止轉頭重複註冊</div>
 
     <div id="status" class="status">正在載入本地 NPU/GPU 加速模型...</div>
 
@@ -117,7 +117,6 @@
 
         <div class="control-panel">
             <button class="btn" onclick="exportCSV()">匯出紀錄 (CSV)</button>
-            
             <h3 style="margin: 10px 0;">即時狀態追蹤表</h3>
             <div class="log-table-container">
                 <table>
@@ -125,6 +124,7 @@
                         <tr>
                             <th>自動命名標籤</th>
                             <th>當前狀態</th>
+                            <th>已學習角度</th>
                             <th>累計出現次數</th>
                             <th>最後現身時間</th>
                         </tr>
@@ -142,21 +142,13 @@
         const statusDiv = document.getElementById('status');
         
         let faceMatcher = null;
-        let labeledFaceDescriptors = [];
+        let labeledFaceDescriptors = []; // 存儲結構：[ LabeledFaceDescriptors(name, [desc1, desc2, ...]) ]
         let userDatabase = {}; 
-        /* userDatabase 結構:
-          {
-             "新用戶-X7B2": {
-                count: 1,                // 累計出現次數
-                lastSeenTimestamp: 1234, // 最後一次被偵測到的時間戳
-                status: "在線"           // "在線" 或 "離開"
-             }
-          }
-        */
 
-        const AWAY_TIMEOUT = 5000; // 離開閾值設定為 5 秒（若消失超過5秒，下次回來算新的一次）
+        const AWAY_TIMEOUT = 6000;      // 離開閾值 6 秒
+        const MATCH_THRESHOLD = 0.52;   // 比對閾值（越低越嚴格，0.52 較適合兼顧側臉）
+        const UPDATE_THRESHOLD = 0.42;  // 自動學習更新閾值（當判定是某人，且距離小於 0.42 時，自動把新角度追加進去）
 
-        // 1. 初始化 AI 模型
         async function init() {
             try {
                 statusDiv.innerText = "正在從網絡載入微型人臉特徵庫...";
@@ -172,12 +164,11 @@
             }
         }
 
-        // 2. 開啟相機
         function startVideo() {
             navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
                 .then(stream => {
                     video.srcObject = stream;
-                    statusDiv.innerText = "🟢 系統監控中（鏡頭前出現未註冊人士會自動錄入）";
+                    statusDiv.innerText = "🟢 系統監控中（請面向鏡頭，並慢慢向左、右轉頭讓系統學習你的側臉）";
                     video.addEventListener('play', onProcessLoop);
                 })
                 .catch(err => {
@@ -185,22 +176,16 @@
                 });
         }
 
-        // 3. 根據人臉特徵 Descriptor 生成唯一的 4 位短碼作為「特徵名字」
         function generateFeatureName(descriptor) {
-            // 取特徵向量的前 5 個數值的絕對值求和，映射為 16 進制，確保同一個人的特徵算出來的名字極度接近
             let sum = 0;
-            for(let i = 0; i < 5; i++) {
-                sum += Math.abs(descriptor[i]);
-            }
+            for(let i = 0; i < 5; i++) { sum += Math.abs(descriptor[i]); }
             const hexCode = Math.floor(sum * 10000).toString(16).toUpperCase().substring(0, 4);
-            return `新用戶-${hexCode}`;
+            return `用戶-${hexCode}`;
         }
 
-        // 4. 核心偵測、自動註冊與在線更新邏輯
         async function onProcessLoop() {
             if (video.paused || video.ended) return setTimeout(() => onProcessLoop(), 1000);
 
-            // 1. 抓取鏡頭中所有人臉
             const detections = await faceapi.detectAllFaces(video)
                 .withFaceLandmarks()
                 .withFaceDescriptors();
@@ -212,26 +197,25 @@
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            const now = window.performance.now() ? Date.now() : new Date().getTime();
+            const now = Date.now();
             let currentFrameDetectedNames = new Set();
 
-            // 2. 遍歷當前幀看到的每一張臉
             resizedDetections.forEach(detection => {
                 let matchedName = null;
+                let bestMatchResult = null;
 
-                // 如果已有註冊庫，先比對
+                // 1. 比對現有特徵庫
                 if (faceMatcher && labeledFaceDescriptors.length > 0) {
-                    const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
-                    if (bestMatch.label !== 'unknown' && bestMatch.distance < 0.5) {
-                        matchedName = bestMatch.label;
+                    bestMatchResult = faceMatcher.findBestMatch(detection.descriptor);
+                    // 如果匹配度小於設定閾值，認定為同一個人
+                    if (bestMatchResult.label !== 'unknown' && bestMatchResult.distance < MATCH_THRESHOLD) {
+                        matchedName = bestMatchResult.label;
                     }
                 }
 
-                // 【自動註冊】如果沒找到匹配，說明是全新的面孔，立刻進行自動命名並註冊
+                // 2. 自動註冊新用戶
                 if (!matchedName) {
                     matchedName = generateFeatureName(detection.descriptor);
-                    
-                    // 防止特徵微調時名字發生微小碰撞，重名則加後綴
                     let finalName = matchedName;
                     let counter = 1;
                     while (userDatabase[finalName]) {
@@ -240,59 +224,63 @@
                     }
                     matchedName = finalName;
 
-                    // 寫入本地 AI 內存識別庫
-                    labeledFaceDescriptors.push(new faceapi.LabeledFaceDescriptors(matchedName, [detection.descriptor]));
+                    // 註冊時，建立擁有一個特徵向量的陣列
+                    const newLabelObj = new faceapi.LabeledFaceDescriptors(matchedName, [detection.descriptor]);
+                    labeledFaceDescriptors.push(newLabelObj);
                     faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
+                } 
+                // 3. 【動態學習】如果認出是已知用戶，但這是一個稍微不同的新角度
+                else if (bestMatchResult && bestMatchResult.distance > 0.35) {
+                    // 當前角度與現有特徵有一定差異，但又確認是你時，把這個新角度追加到你的特徵列表裡
+                    const targetUser = labeledFaceDescriptors.find(l => l.label === matchedName);
+                    if (targetUser && targetUser.descriptors.length < 15) { // 每個用戶最多儲存 15 個角度特徵防止過載
+                        targetUser.descriptors.push(detection.descriptor);
+                        // 重新整理識別引擎
+                        faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
+                    }
                 }
 
                 currentFrameDetectedNames.add(matchedName);
 
-                // 【核心狀態邏輯】更新用戶在線狀態與次數
+                // 4. 更新數據庫狀態
                 if (!userDatabase[matchedName]) {
-                    // 全新註冊進數據庫：次數=1，狀態=在線
                     userDatabase[matchedName] = {
                         count: 1,
                         lastSeenTimestamp: now,
                         status: "在線"
                     };
                 } else {
-                    // 已存在的用戶
-                    const timeElapsedSinceLastSeen = now - userDatabase[matchedName].lastSeenTimestamp;
-
-                    if (userDatabase[matchedName].status === "離開" && timeElapsedSinceLastSeen > AWAY_TIMEOUT) {
-                        // 判定：用戶之前離開了（且消失超過5秒），現在是「重新回來」，次數加 1
+                    const timeElapsed = now - userDatabase[matchedName].lastSeenTimestamp;
+                    if (userDatabase[matchedName].status === "離開" && timeElapsed > AWAY_TIMEOUT) {
                         userDatabase[matchedName].count += 1;
                     }
-                    
-                    // 如果他「一直站在鏡頭前」，只會走到這一步：更新時間，保持在線，【次數不會增加】
                     userDatabase[matchedName].lastSeenTimestamp = now;
                     userDatabase[matchedName].status = "在線";
                 }
 
-                // 在畫面上繪製識別框與名字
+                // 獲取該用戶目前學習了多少個特徵角度
+                const featureCount = labeledFaceDescriptors.find(l => l.label === matchedName)?.descriptors.length || 1;
+                userDatabase[matchedName].anglesLearned = featureCount;
+
+                // 畫框
                 const box = detection.detection.box;
-                const drawBox = new faceapi.draw.DrawBox(box, { label: `${matchedName} (Tracking)` });
+                const drawBox = new faceapi.draw.DrawBox(box, { label: `${matchedName} (角度學習中)` });
                 drawBox.draw(canvas);
             });
 
-            // 3. 【離線掃描】檢查那些在數據庫裡、但這一幀沒有出現在鏡頭前的用戶
+            // 5. 離線檢查
             for (let name in userDatabase) {
                 if (!currentFrameDetectedNames.has(name)) {
-                    // 如果這個人這幀不在，且距離最後現身時間超過 5 秒，則狀態改為「離開」
                     if (now - userDatabase[name].lastSeenTimestamp > AWAY_TIMEOUT) {
                         userDatabase[name].status = "離開";
                     }
                 }
             }
 
-            // 4. 更新表格
             renderTable();
-
-            // 每 300 毫秒跑一次，降低 CPU/NPU 負擔，運行依然非常流暢
-            setTimeout(() => onProcessLoop(), 300);
+            setTimeout(() => onProcessLoop(), 250); // 每秒跑 4 次，保持流暢與學習效率
         }
 
-        // 5. 渲染表格數據
         function renderTable() {
             const tbody = document.getElementById('logTrack');
             tbody.innerHTML = '';
@@ -309,6 +297,7 @@
                 tr.innerHTML = `
                     <td><strong>${name}</strong></td>
                     <td>${statusBadge}</td>
+                    <td><span style="color:#e67e22; font-weight:bold;">${user.anglesLearned || 1} 個骨骼視角</span></td>
                     <td><b style="color:#2980b9; font-size:15px;">${user.count}</b> 次</td>
                     <td>${lastSeenTime}</td>
                 `;
@@ -316,18 +305,17 @@
             }
         }
 
-        // 6. 匯出 CSV 紀錄檔案
         function exportCSV() {
-            let csvContent = "data:text/csv;charset=utf-8,\uFEFF特徵用戶標籤,累計出現次數,最後現身時間,最終狀態\n";
+            let csvContent = "data:text/csv;charset=utf-8,\uFEFF用戶標籤,已儲存特徵數,累計出現次數,最後現身時間,最終狀態\n";
             for (let name in userDatabase) {
                 const user = userDatabase[name];
                 const timeStr = new Date(user.lastSeenTimestamp).toLocaleTimeString();
-                csvContent += `${name},${user.count},${timeStr},${user.status}\n`;
+                csvContent += `${name},${user.anglesLearned},${user.count},${timeStr},${user.status}\n`;
             }
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
-            link.setAttribute("download", `AI_Continuous_Track_${new Date().toISOString().slice(0,10)}.csv`);
+            link.setAttribute("download", `AI_MultiAngle_Track_${new Date().toISOString().slice(0,10)}.csv`);
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
