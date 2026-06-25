@@ -39,9 +39,9 @@
 <body>
 
     <h1>Edge AI 工業級多目標考勤與高精度情緒分析系統</h1>
-    <div class="subtitle">硬體加速版：整合高精度 FERPlus 卷積表情神經網絡，實現高容忍度、高準確性心理狀態統計</div>
+    <div class="subtitle">硬體加速量化版：成功對齊本地 INT8 輕量化 FERPlus 模型，解決 Failed to fetch 跨域報錯</div>
 
-    <div id="status" class="status">載入工業級高精度人臉識別與 FERPlus 表情模型中...</div>
+    <div id="status" class="status">初始化本地 AI 特徵庫與加載 INT8 表情大模型中...</div>
 
     <div class="container">
         <div class="video-box">
@@ -71,7 +71,7 @@
 
     <div class="manager-panel">
         <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 10px;">
-            <h3 style="margin: 0;">視覺化用戶名冊（手動合併誤判標籤）</h3>
+            <h3 style="margin: 0;">視覺化用戶名冊（手動合併因轉頭造成的誤判標籤）</h3>
             <button class="btn btn-warning" onclick="mergeSelectedUsers()">合併選中的用戶特徵</button>
         </div>
         <div class="user-grid" id="userGrid"></div>
@@ -86,13 +86,13 @@
         let faceMatcher = null;
         let labeledFaceDescriptors = [];
         let userDatabase = {}; 
-        let emotionSession = null; // ONNX 高精度表情模型會話
+        let emotionSession = null; 
         
         let lastLoopTime = Date.now();
         const AWAY_TIMEOUT = 5000; 
-        const MATCH_THRESHOLD = 0.65; 
+        const MATCH_THRESHOLD = 0.65; // 基礎人臉比對閾值
 
-        // 工業級 FERPlus 模型的 8 類高精度情緒輸出映射
+        // FERPlus 模型標準的 8 類高精度情緒對照表
         const emotionMap = {
             0: "中性/平靜專注",
             1: "愉悅/有活力",
@@ -107,26 +107,25 @@
 
         async function init() {
             try {
-                statusDiv.innerText = "⏳ 正在載入工業級人臉庫與下載 30MB+ 高精度 FERPlus 表情 ONNX 模型...";
+                statusDiv.innerText = "⏳ 正在從本目錄下載並初始化你上傳的 emotion-ferplus-12-int8.onnx 模型...";
                 
+                // 1. 載入 face-api.js 的基礎特徵組件
                 const FACE_MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
                 await faceapi.nets.ssdMobilenetv1.loadFromUri(FACE_MODEL_URL);
                 await faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODEL_URL);
                 await faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URL);
                 
-                // 核心改動：利用 ONNX Runtime Web 載入微軟工業級開源的 FERPlus 高精度模型
-                // 第一次加載會需要下載，之後瀏覽器會完美進行本機快取（Cache），秒開！
-                // 使用全球開放跨域的 jsDelivr CDN 節點
-                const onnxModelUrl = 'https://cdn.jsdelivr.net/gh/onnx/models@main/validated/vision/classification/emotion_ferplus/model/emotion_ferplus-8.onnx';
+                // 2. 指向你上傳到 GitHub 的量化版 ONNX 模型檔案名稱
+                const onnxModelUrl = './emotion-ferplus-12-int8.onnx';
                 
-                // 根據你強勁的硬體配置，優先選用 WebGPU 進行硬體加速，否則退回 WebGL 或 WASM
+                // 3. 配置最高等級硬體加速
                 const options = { executionProviders: ['webgpu', 'webgl', 'wasm'] };
                 emotionSession = await ort.InferenceSession.create(onnxModelUrl, options);
                 
-                statusDiv.innerHTML = "🚀 <span style='color: #2ecc71;'>工業級 FERPlus 大模型載入成功！本地 NPU/GPU 已全速啟動</span>";
+                statusDiv.innerHTML = "🚀 <span style='color: #2ecc71;'>本地 INT8 量化大模型成功綁定！硬體全速監控中</span>";
                 startVideo();
             } catch (err) {
-                statusDiv.innerHTML = "❌ 模型載入失敗 (請確保瀏覽器支援 WebGPU/WebGL): " + err.message;
+                statusDiv.innerHTML = "❌ 模型載入失敗，請確認檔名是否與倉庫內完全一致: " + err.message;
             }
         }
 
@@ -161,37 +160,44 @@
             } catch (e) { return ''; }
         }
 
-        // 【全新高精度表情分析核心】預處理人臉圖像並送入 ONNX 推理
+        // 【高精度 INT8 卷積推理核心】
         async function predictExpressionAccurate(videoEl, faceBox) {
-            if (!emotionSession) return 0; // 尚未加載完畢預設返回中性
+            if (!emotionSession) return 0; 
             try {
                 const canvasBox = document.createElement('canvas');
                 const ctxBox = canvasBox.getContext('2d');
-                // FERPlus模型標準輸入：64x64 像素的單通道灰階圖像
+                
+                // FERPlus 標準輸入規格：64x64 正方形
                 canvasBox.width = 64;
                 canvasBox.height = 64;
                 
                 ctxBox.drawImage(videoEl, faceBox.x, faceBox.y, faceBox.width, faceBox.height, 0, 0, 64, 64);
                 const imgData = ctxBox.getImageData(0, 0, 64, 64);
                 
-                // 將圖像矩陣轉為灰階並歸一化為 Float32 Tensor
+                // 計算灰階通道，產生單通道矩陣
                 const inputBuffer = new Float32Array(64 * 64);
                 for (let i = 0; i < imgData.data.length; i += 4) {
                     const r = imgData.data[i];
                     const g = imgData.data[i+1];
                     const b = imgData.data[i+2];
-                    // 灰階公式
                     const gray = 0.299 * r + 0.587 * g + 0.114 * b;
                     inputBuffer[i / 4] = gray; 
                 }
                 
                 const inputTensor = new ort.Tensor('float32', inputBuffer, [1, 1, 64, 64]);
-                // 送入強大的本地 ONNX 引擎進行矩陣推理
-                const feeds = { input_1: inputTensor };
+                
+                // 自動對齊多端模型節點名稱（動態兼容防出錯）
+                const inputName = emotionSession.inputNames[0]; 
+                const feeds = {};
+                feeds[inputName] = inputTensor;
+                
+                // 本地運算執行推理
                 const results = await emotionSession.run(feeds);
                 
-                // 獲取模型輸出的 8 個表情維度的機率分佈（Softmax）
-                const outputData = results.plus_214.data; 
+                const outputName = emotionSession.outputNames[0];
+                const outputData = results[outputName].data; 
+                
+                // 解析 Softmax 分佈中得分最高的情緒索引
                 let maxIndex = 0;
                 let maxVal = outputData[0];
                 for (let i = 1; i < outputData.length; i++) {
@@ -200,10 +206,10 @@
                         maxIndex = i;
                     }
                 }
-                return maxIndex; // 返回最精準的表情索引 (0-7)
+                return maxIndex; 
             } catch (e) {
-                console.error("ONNX 推理出錯:", e);
-                return 0;
+                console.error("INT8 模型推理出錯:", e);
+                return 0; 
             }
         }
 
@@ -243,12 +249,12 @@
                     }
                 }
 
-                // 【核心改動】調用工業級大模型進行高精度即時表情預測
+                // 呼叫高精度量化模型
                 const emotionIdx = await predictExpressionAccurate(video, detection.detection.box);
                 const chEmotion = emotionMap[emotionIdx];
                 const emotionKey = emotionKeys[emotionIdx];
 
-                // 新用戶註冊
+                // 新用戶註冊與頭像裁剪
                 if (!matchedName) {
                     matchedName = generateFeatureName(detection.descriptor);
                     let finalName = matchedName;
@@ -268,7 +274,7 @@
                     userDatabase[matchedName].emotionHistory[emotionKey] = 1;
                     renderUserGrid();
                 } else {
-                    // 已有用戶動態補全角度特徵
+                    // 自動動態追加過渡特徵
                     const targetUser = labeledFaceDescriptors.find(l => l.label === matchedName);
                     if (targetUser && targetUser.descriptors.length < 30) {
                         targetUser.descriptors.push(detection.descriptor);
@@ -291,7 +297,6 @@
                     user.emotionHistory[emotionKey] += 1;
                 }
 
-                // 畫出畫框與大模型表情文字
                 const box = detection.detection.box;
                 const drawBox = new faceapi.draw.DrawBox(box, { label: `${matchedName} [${chEmotion}]` });
                 drawBox.draw(canvas);
@@ -367,7 +372,7 @@
             const namesToMerge = Array.from(checkboxes).map(cb => cb.value);
             const primaryName = namesToMerge[0];
             
-            if (!confirm(`確定要將其餘標籤合併到 ${primaryName} 嗎？\n時長、次數及高精度表情歷史數據將全方位合流。`)) return;
+            if (!confirm(`確定要將其餘標籤合併到 ${primaryName} 嗎？\n時長、次數及表情統計歷史將進行全數據融合。`)) return;
 
             const primaryUserInDB = userDatabase[primaryName];
             const primaryUserInAI = labeledFaceDescriptors.find(l => l.label === primaryName);
@@ -397,7 +402,7 @@
 
             faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
             renderUserGrid(); renderTable();
-            alert("多維度高精度數據合併成功！");
+            alert("多維度特徵與情緒數據合併成功！");
         }
 
         function exportCSV() {
@@ -409,7 +414,7 @@
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
-            link.setAttribute("download", `AI_FERPlus_Attendance_Report_${new Date().toISOString().slice(0,10)}.csv`);
+            link.setAttribute("download", `AI_INT8_FERPlus_Attendance_Report_${new Date().toISOString().slice(0,10)}.csv`);
             document.body.appendChild(link); link.click(); document.body.removeChild(link);
         }
 
