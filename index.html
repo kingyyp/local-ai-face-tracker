@@ -40,7 +40,6 @@
         .clickable-name { color: #3498db; cursor: pointer; text-decoration: underline; }
         .clickable-name:hover { color: #2980b9; }
 
-        /* 彈窗（Modal）樣式 */
         .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); align-items: center; justify-content: center; }
         .modal-content { background-color: white; padding: 30px; border-radius: 12px; max-width: 450px; width: 90%; text-align: center; position: relative; box-shadow: 0 5px 25px rgba(0,0,0,0.2); }
         .close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: #aaa; }
@@ -51,7 +50,7 @@
 <body>
 
     <h1>Edge AI 工業級多目標考勤與高精度情緒分析系統</h1>
-    <div class="subtitle">視覺化升級版：動態採樣全情緒矩陣機率分佈，支援 Chart.js 實時精細百分比與動態圓餅圖</div>
+    <div class="subtitle">視覺化升級版：動態採樣全情緒矩陣機率分佈，支援自動清除背景誤判非人頭噪點</div>
 
     <div id="status" class="status">初始化本地 AI 特徵庫與加載 INT8 表情大模型中...</div>
 
@@ -83,7 +82,7 @@
 
     <div class="manager-panel">
         <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 10px;">
-            <h3 style="margin: 0;">視覺化用戶名冊（手動合併標籤）</h3>
+            <h3 style="margin: 0;">視覺化用戶名冊（具備 10s 自動背景防噪剔除功能）</h3>
             <button class="btn btn-warning" onclick="mergeSelectedUsers()">合併選中的用戶特徵</button>
         </div>
         <div class="user-grid" id="userGrid"></div>
@@ -111,19 +110,18 @@
         let emotionSession = null; 
         
         let lastLoopTime = Date.now();
+        let lastCleanTime = Date.now(); // 記錄上一次清理噪點的時間
         const AWAY_TIMEOUT = 5000; 
         const MATCH_THRESHOLD = 0.65; 
+        const CLEAN_INTERVAL = 10000; // 每 10000 毫秒 (10秒) 執行一次無效頭像清理
 
-        // 圓餅圖全局變數
         let currentChartInstance = null;
         let activeModalUser = null;
 
-        // FERPlus 模型標準的 8 類高精度情緒對照表
         const emotionMap = {
             0: "中性", 1: "愉悅", 2: "疲憊", 3: "嚴肅", 4: "緊張", 5: "驚訝", 6: "反感", 7: "輕蔑"
         };
         const emotionKeys = ["neutral", "happy", "sad", "angry", "fearful", "surprised", "disgusted", "contempt"];
-        // 圓餅圖對應的顏色矩陣（高科技感莫蘭迪色系）
         const emotionColors = [
             '#95a5a6', '#2ecc71', '#34495e', '#e74c3c', '#9b59b6', '#f1c40f', '#e67e22', '#d35400'
         ];
@@ -141,7 +139,7 @@
                 const options = { executionProviders: ['webgpu', 'webgl', 'wasm'] };
                 emotionSession = await ort.InferenceSession.create(onnxModelUrl, options);
                 
-                statusDiv.innerHTML = "🚀 <span style='color: #2ecc71;'>本地 INT8 圓餅圖視覺化大模型成功綁定！硬體全速監控中</span>";
+                statusDiv.innerHTML = "🚀 <span style='color: #2ecc71;'>本地 INT8 智慧去噪大模型成功綁定！硬體全速監控中</span>";
                 startVideo();
             } catch (err) {
                 statusDiv.innerHTML = "❌ 模型載入失敗，請確認檔名是否與倉庫內完全一致: " + err.message;
@@ -154,6 +152,7 @@
                     video.srcObject = stream;
                     video.addEventListener('play', () => {
                         lastLoopTime = Date.now();
+                        lastCleanTime = Date.now();
                         onProcessLoop();
                     });
                 })
@@ -237,6 +236,7 @@
             for (let i = 0; i < resizedDetections.length; i++) {
                 const detection = resizedDetections[i];
                 let matchedName = null;
+                const detectionScore = detection.detection.score; // 獲取當前捕獲的置信度
 
                 if (faceMatcher && labeledFaceDescriptors.length > 0) {
                     const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
@@ -260,9 +260,10 @@
                     labeledFaceDescriptors.push(new faceapi.LabeledFaceDescriptors(matchedName, [detection.descriptor]));
                     faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
 
+                    // 在數據庫中新增最高置信度記錄 (maxDetectionScore)，初始為當前值
                     userDatabase[matchedName] = { 
                         count: 1, lastSeenTimestamp: now, status: "在線", avatar: avatarDataUrl,
-                        totalDuration: 0, currentExpression: chEmotion,
+                        totalDuration: 0, currentExpression: chEmotion, maxDetectionScore: detectionScore,
                         emotionHistory: { neutral: 0, happy: 0, sad: 0, angry: 0, fearful: 0, surprised: 0, disgusted: 0, contempt: 0 }
                     };
                     userDatabase[matchedName].emotionHistory[emotionKey] = 1;
@@ -284,12 +285,16 @@
                     const timeElapsed = now - user.lastSeenTimestamp;
                     if (user.status === "離開" && timeElapsed > AWAY_TIMEOUT) user.count += 1;
 
+                    // 刷新最高辨識分數
+                    if (detectionScore > user.maxDetectionScore) {
+                        user.maxDetectionScore = detectionScore;
+                    }
+
                     user.lastSeenTimestamp = now;
                     user.status = "在線";
                     user.currentExpression = chEmotion;
                     user.emotionHistory[emotionKey] += 1;
 
-                    // 如果目前該用戶的圓餅圖彈窗正開著，實時更新圓餅圖數據
                     if (activeModalUser === matchedName && currentChartInstance) {
                         updateLivePieChart(user.emotionHistory);
                     }
@@ -308,11 +313,49 @@
                 }
             }
 
+            // 【核心去噪功能】：每 10 秒自動檢查並踢除無效物件
+            if (now - lastCleanTime > CLEAN_INTERVAL) {
+                checkAndCleanFalseDetections();
+                lastCleanTime = now;
+            }
+
             renderTable();
             setTimeout(() => onProcessLoop(), 150); 
         }
 
-        // 核心改動：計算精細的百分比分佈清單
+        // 定期自動清洗函數：檢查並刪除極可能是背景或陰影誤判的標籤
+        function checkAndCleanFalseDetections() {
+            let changeDetected = false;
+            for (let name in userDatabase) {
+                const user = userDatabase[name];
+                
+                // 剔除核心邏輯：
+                // 1. 該目標目前處於「已離開」狀態
+                // 2. 且它的一生中最高人臉辨識分數小於 0.82 (真正的人類正臉分數通常在 0.90 ~ 0.99 之間，而背景雜訊往往只有 0.4 ~ 0.7)
+                // 3. 且累計被偵測到的有效時長極短 (小於 3 秒)，說明只是鏡頭晃過或背景偶發性誤判
+                if (user.status === "離開" && user.maxDetectionScore < 0.82 && user.totalDuration < 3000) {
+                    
+                    console.log(`[系統去噪] 自動移除疑似背景非人頭物件: ${name} (最高置信度: ${user.maxDetectionScore.toFixed(2)})`);
+                    
+                    // 如果這個死掉的標籤剛好開著圓餅圖，關閉它
+                    if (activeModalUser === name) closeModal();
+
+                    // 從主數據庫刪除
+                    delete userDatabase[name];
+                    // 從 face-api.js 的特徵比對庫中清除
+                    labeledFaceDescriptors = labeledFaceDescriptors.filter(l => l.label !== name);
+                    
+                    changeDetected = true;
+                }
+            }
+
+            if (changeDetected) {
+                // 重新封裝人臉比對器並刷新頭像名冊佈局
+                faceMatcher = labeledFaceDescriptors.length > 0 ? new faceapi.FaceMatcher(labeledFaceDescriptors) : null;
+                renderUserGrid();
+            }
+        }
+
         function generateDetailedEmotionHTML(emotionHistory) {
             let totalDataPoints = 0;
             for (let key in emotionHistory) { totalDataPoints += emotionHistory[key]; }
@@ -353,7 +396,6 @@
             }
         }
 
-        // 【全新功能】開啟 Chart.js 圓餅圖彈窗
         function openChartModal(userName) {
             const user = userDatabase[userName];
             if (!user) return;
@@ -362,16 +404,13 @@
             document.getElementById('chartModal').style.display = 'flex';
 
             const ctxPie = document.getElementById('pieChartCanvas').getContext('2d');
-
-            // 提取數據
             const dataValues = emotionKeys.map(key => user.emotionHistory[key]);
             const labels = emotionKeys.map((_, idx) => emotionMap[idx]);
 
             if (currentChartInstance) {
-                currentChartInstance.destroy(); // 銷毀舊圖表防止重疊
+                currentChartInstance.destroy(); 
             }
 
-            // 初始化全新 Chart.js 圓餅圖
             currentChartInstance = new Chart(ctxPie, {
                 type: 'pie',
                 data: {
@@ -392,12 +431,11 @@
             });
         }
 
-        // 實時沖刷動態彈窗內圓餅圖的數據
         function updateLivePieChart(emotionHistory) {
             if (!currentChartInstance) return;
             const dataValues = emotionKeys.map(key => emotionHistory[key]);
             currentChartInstance.data.datasets[0].data = dataValues;
-            currentChartInstance.update('none'); // 使用 'none' 模式進行高性能無動畫刷新
+            currentChartInstance.update('none'); 
         }
 
         function closeModal() {
@@ -452,6 +490,11 @@
                     primaryUserInDB.lastSeenTimestamp = secondaryUserInDB.lastSeenTimestamp;
                 }
 
+                // 融合置信度分數
+                if (secondaryUserInDB.maxDetectionScore > primaryUserInDB.maxDetectionScore) {
+                    primaryUserInDB.maxDetectionScore = secondaryUserInDB.maxDetectionScore;
+                }
+
                 for (let key in primaryUserInDB.emotionHistory) {
                     primaryUserInDB.emotionHistory[key] += secondaryUserInDB.emotionHistory[key];
                 }
@@ -472,16 +515,15 @@
         }
 
         function exportCSV() {
-            let csvContent = "data:text/csv;charset=utf-8,\uFEFF用戶標籤,累計出現次數,總停留時間(秒),當前表情,狀態,中性計數,愉悅計數,疲憊計數,嚴肅計數,緊張計數,驚訝計數,反感計數,輕蔑計數\n";
+            let csvContent = "data:text/csv;charset=utf-8,\uFEFF用戶標籤,累計出現次數,總停留時間(秒),當前表情,狀態,最高置信度\n";
             for (let name in userDatabase) {
                 const user = userDatabase[name];
-                const h = user.emotionHistory;
-                csvContent += `${name},${user.count},${Math.floor(user.totalDuration / 1000)},${user.currentExpression},${user.status},${h.neutral},${h.happy},${h.sad},${h.angry},${h.fearful},${h.surprised},${h.disgusted},${h.contempt}\n`;
+                csvContent += `${name},${user.count},${Math.floor(user.totalDuration / 1000)},${user.currentExpression},${user.status},${user.maxDetectionScore.toFixed(4)}\n`;
             }
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
-            link.setAttribute("download", `AI_Detailed_Report_${new Date().toISOString().slice(0,10)}.csv`);
+            link.setAttribute("download", `AI_AntiNoise_Report_${new Date().toISOString().slice(0,10)}.csv`);
             document.body.appendChild(link); link.click(); document.body.removeChild(link);
         }
 
