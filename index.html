@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edge AI 本地人臉識別與考勤系統</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #f5f7fb;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 { color: #2c3e50; margin-bottom: 5px; }
+        .subtitle { color: #7f8c8d; margin-bottom: 20px; font-size: 14px; }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            max-width: 1200px;
+            width: 100%;
+        }
+        .video-box {
+            position: relative;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            width: 640px;
+            height: 480px;
+        }
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 640px;
+            height: 480px;
+        }
+        .control-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            flex: 1;
+            min-width: 300px;
+            max-height: 480px;
+            display: flex;
+            flex-direction: column;
+        }
+        .btn {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-bottom: 15px;
+            transition: background 0.2s;
+        }
+        .btn:hover { background-color: #2980b9; }
+        .btn-success { background-color: #2ecc71; }
+        .btn-success:hover { background-color: #27ae60; }
+        .log-table-container {
+            flex: 1;
+            overflow-y: auto;
+            margin-top: 10px;
+            border: 1px solid #eee;
+            border-radius: 6px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th { background-color: #f8f9fa; position: sticky; top: 0; }
+        .status {
+            font-weight: bold;
+            color: #e67e22;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Edge AI 本地人臉識別紀錄器</h1>
+    <div class="subtitle">完全利用瀏覽器硬件加速 (GPU/NPU)，數據絕不上傳伺服器</div>
+
+    <div id="status" class="status">正在載入 AI 模型，請稍候...</div>
+
+    <div class="container">
+        <div class="video-box">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+
+        <div class="control-panel">
+            <button id="regBtn" class="btn" disabled>將當前畫面的人註冊為新用戶</button>
+            <button id="exportBtn" class="btn btn-success" onclick="exportCSV()">匯出紀錄 (CSV)</button>
+            
+            <h3>即時偵測與時間統計</h3>
+            <div class="log-table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>姓名/標籤</th>
+                            <th>出現次數</th>
+                            <th>最後出現時間</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logTrack">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('overlay');
+        const statusDiv = document.getElementById('status');
+        const regBtn = document.getElementById('regBtn');
+        
+        let faceMatcher = null;
+        let labeledFaceDescriptors = [];
+        let userStats = {}; // 紀錄每個人出現的次數和時間 { "張三": { count: 1, lastSeen: '...' } }
+        let currentDescriptors = []; // 當前畫面上偵測到的特徵
+
+        // 1. 初始化並載入模型
+        async function init() {
+            try {
+                statusDiv.innerText = "正在從 CDN 下載權重模型 (約 5MB)...";
+                // 使用 face-api.js 載入極輕量型的 MobilenetV1 模型
+                // 這些模型會自動嘗試開啟 WebGL/WebGPU 硬件加速
+                const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+                await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                
+                statusDiv.innerText = "模型載入成功！正在啟動相機...";
+                startVideo();
+            } catch (err) {
+                statusDiv.innerText = "初始化失敗: " + err.message;
+                console.error(err);
+            }
+        }
+
+        // 2. 啟動鏡頭
+        function startVideo() {
+            navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+                .then(stream => {
+                    video.srcObject = stream;
+                    statusDiv.innerText = "系統運作中（本地 AI 加速已啟用）";
+                    regBtn.disabled = false;
+                    // 當視訊開始播放，啟動辨識迴圈
+                    video.addEventListener('play', onPlay);
+                })
+                .catch(err => {
+                    statusDiv.innerText = "無法開啟相機: " + err.message;
+                });
+        }
+
+        // 3. 核心偵測與比對迴圈
+        async function onPlay() {
+            if (video.paused || video.ended) return setTimeout(() => onPlay(), 1000);
+
+            // 偵測畫面上所有人臉的特徵
+            const detections = await faceapi.detectAllFaces(video)
+                .withFaceLandmarks()
+                .withFaceDescriptors();
+
+            currentDescriptors = detections; // 存給註冊按鈕用
+
+            // 清理並重新繪製 Canvas
+            const displaySize = { width: video.width || 640, height: video.height || 480 };
+            faceapi.matchDimensions(canvas, displaySize);
+            const resizedDetections = faceapi.resizeResults(detections, displaySize);
+            
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 如果有已經註冊的資料，進行比對
+            resizedDetections.forEach(detection => {
+                let label = 'Unknown (未註冊)';
+                
+                if (faceMatcher && labeledFaceDescriptors.length > 0) {
+                    const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+                    // 閾值設為 0.5（越低越嚴格）
+                    if (bestMatch.distance < 0.5) {
+                        label = bestMatch.label;
+                        updateStats(label); // 更新次數和時間
+                    }
+                }
+
+                // 畫出人臉框與名字
+                const box = detection.detection.box;
+                const drawBox = new faceapi.draw.DrawBox(box, { label: label });
+                drawBox.draw(canvas);
+            });
+
+            // 1秒執行大約 5~10 次（視用戶電腦 GPU/NPU 效能而定）
+            setTimeout(() => onPlay(), 200);
+        }
+
+        // 4. 更新統計紀錄
+        function updateStats(name) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+
+            if (!userStats[name]) {
+                userStats[name] = { count: 1, lastSeen: timeStr, lastSeenTimestamp: now.getTime() };
+            } else {
+                // 防止同一個人站在鏡頭前數字瘋狂飆升，設定 3 秒冷卻時間才算下一次出現
+                if (now.getTime() - userStats[name].lastSeenTimestamp > 3000) {
+                    userStats[name].count += 1;
+                }
+                userStats[name].lastSeen = timeStr;
+                userStats[name].lastSeenTimestamp = now.getTime();
+            }
+            renderTable();
+        }
+
+        // 5. 渲染右側表格
+        function renderTable() {
+            const tbody = document.getElementById('logTrack');
+            tbody.innerHTML = '';
+            for (let name in userStats) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><strong>${name}</strong></td>
+                    <td>${userStats[name].count} 次</td>
+                    <td>${userStats[name].lastSeen}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+        }
+
+        // 6. 註冊新用戶功能
+        regBtn.addEventListener('click', () => {
+            if (currentDescriptors.length === 0) {
+                alert("鏡頭前沒有發現任何人臉，無法註冊！");
+                return;
+            }
+            if (currentDescriptors.length > 1) {
+                alert("鏡頭前有超過一張臉，請確保只有一個人進行註冊。");
+                return;
+            }
+
+            const name = prompt("請輸入這個人的名字：");
+            if (!name) return;
+
+            const descriptor = currentDescriptors[0].descriptor;
+            
+            // 把特徵加入到已註冊列表
+            labeledFaceDescriptors.push(new faceapi.LabeledFaceDescriptors(name, [descriptor]));
+            
+            // 重新初始化比對器
+            faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors);
+            alert(`註冊成功！系統依家認得 ${name} 啦！`);
+        });
+
+        // 7. 匯出 CSV 紀錄
+        function exportCSV() {
+            let csvContent = "data:text/csv;charset=utf-8,\uFEFF姓名,出現次數,最後出現時間\n";
+            for (let name in userStats) {
+                csvContent += `${name},${userStats[name].count},${userStats[name].lastSeen}\n`;
+            }
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `AI_Face_Log_${new Date().toISOString().slice(0,10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // 執行初始化
+        window.onload = init;
+    </script>
+</body>
+</html>
